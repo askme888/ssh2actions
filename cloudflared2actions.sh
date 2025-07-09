@@ -8,7 +8,7 @@
 #
 # File name：cloudflared-ssh.sh
 # Description: Connect to GitHub Actions VM via SSH using Cloudflared
-# Version: 1.1
+# Version: 1.2
 
 Green_font_prefix="\033[32m"
 Red_font_prefix="\033[31m"
@@ -21,6 +21,7 @@ WARN="[${Yellow_font_prefix}WARN${Font_color_suffix}]"
 LOG_FILE='/tmp/cloudflared.log'
 CONTINUE_FILE="/tmp/continue"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
+SSH_PORT="2222"  # 使用非特权端口
 
 # 检查必要的环境变量
 if [[ -z "${SSH_PASSWORD}" && -z "${SSH_PUBKEY}" && -z "${GH_SSH_PUBKEY}" ]]; then
@@ -77,6 +78,9 @@ MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha1
 # 允许更多认证方式
 PubkeyAuthentication yes
 PasswordAuthentication yes
+
+# 使用非特权端口
+Port ${SSH_PORT}
 EOF
 
     # 设置用户密码
@@ -131,13 +135,13 @@ start_cloudflared_tunnel() {
     
     echo -e "${INFO} 使用隧道主机名: ${TUNNEL_HOST}"
     
-    # 启动隧道
+    # 启动隧道（使用非特权端口）
     screen -dmS cloudflared \
-        sudo ${CLOUDFLARED_BIN} access tcp \
+        ${CLOUDFLARED_BIN} access tcp \
         --hostname "${TUNNEL_HOST}" \
-        --url tcp://localhost:22 \
+        --url tcp://localhost:${SSH_PORT} \  # 使用自定义端口
         --logfile "${LOG_FILE}" \
-        --loglevel "debug"
+        --loglevel "info"
     
     echo -e "${INFO} 等待隧道初始化 (20 秒)..."
     sleep 20
@@ -157,6 +161,9 @@ start_cloudflared_tunnel() {
         cat "${LOG_FILE}"
         exit 5
     fi
+    
+    # 修正端口号（确保使用正确的端口）
+    SSH_CMD=$(echo "${SSH_CMD}" | sed "s/-p [0-9]\+/-p 2222/g")
     
     echo -e "${INFO} SSH 连接命令已获取: ${SSH_CMD}"
 }

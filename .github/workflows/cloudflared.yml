@@ -1,4 +1,4 @@
-name: ubuntu
+name: Cloudflared
 on:
   watch:
     types: started
@@ -6,11 +6,17 @@ jobs:
   ubuntu:
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
     - name: Start SSH via cloudflared
-      uses: askme888/ssh2actions@main
-      with:
-        mode: cloudflared
+      run: |
+        chmod +x cloudflared2actions.sh
+        ./cloudflared2actions.sh
       env:
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        # 可选：如果使用公钥认证，可以设置SSH_PUBKEY或GH_SSH_PUBKEY
+        # SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
+        # GH_SSH_PUBKEY: ${{ secrets.GH_SSH_PUBKEY }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

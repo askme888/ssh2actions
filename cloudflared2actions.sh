@@ -8,7 +8,7 @@
 #
 # File name：cloudflared-ssh.sh
 # Description: Connect to GitHub Actions VM via SSH using Cloudflared
-# Version: 1.2
+# Version: 1.3
 
 Green_font_prefix="\033[32m"
 Red_font_prefix="\033[31m"
@@ -63,24 +63,39 @@ install_cloudflared() {
 configure_ssh() {
     echo -e "${INFO} 配置 SSH 服务..."
     
-    # 解决 SSH 连接兼容性问题
-    echo -e "${INFO} 更新 SSH 配置以解决兼容性问题..."
-    sudo tee -a /etc/ssh/sshd_config > /dev/null << 'EOF'
-# 添加更多密钥交换算法
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1
+    # 备份原始 SSH 配置
+    sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    
+    # 创建新的 SSH 配置
+    echo -e "${INFO} 创建新的 SSH 配置..."
+    sudo tee /etc/ssh/sshd_config > /dev/null << 'EOF'
+# 基础配置
+Port 2222
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+SyslogFacility AUTH
+LogLevel INFO
+LoginGraceTime 120
+PermitRootLogin yes
+StrictModes yes
+IgnoreRhosts yes
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
 
-# 添加更多加密算法
+# 安全算法配置
+KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 
-# 添加更多 MAC 算法
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha1
-
-# 允许更多认证方式
+# 认证设置
 PubkeyAuthentication yes
 PasswordAuthentication yes
-
-# 使用非特权端口
-Port ${SSH_PORT}
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
 EOF
 
     # 设置用户密码
@@ -105,10 +120,18 @@ EOF
         [[ -n "${GH_SSH_PUBKEY}" ]] && echo "${GH_SSH_PUBKEY}" >> "${SSH_DIR}/authorized_keys"
     fi
 
+    # 测试 SSH 配置
+    echo -e "${INFO} 测试 SSH 配置..."
+    if ! sudo /usr/sbin/sshd -t; then
+        echo -e "${ERROR} SSH 配置测试失败，恢复原始配置"
+        sudo cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
+        sudo service ssh restart || sudo systemctl restart ssh
+        exit 4
+    fi
+
     # macOS 特殊配置
     if [[ "$(uname -s)" == "Darwin" ]]; then
         echo -e "${INFO} 配置 macOS SSH 服务..."
-        echo 'PermitRootLogin yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
         sudo launchctl unload /System/Library/LaunchDaemons/ssh.plist
         sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
     else
@@ -135,11 +158,11 @@ start_cloudflared_tunnel() {
     
     echo -e "${INFO} 使用隧道主机名: ${TUNNEL_HOST}"
     
-    # 启动隧道（使用非特权端口）
+    # 启动隧道（使用正确的参数）
     screen -dmS cloudflared \
         ${CLOUDFLARED_BIN} access tcp \
         --hostname "${TUNNEL_HOST}" \
-        --url tcp://localhost:${SSH_PORT} \  # 使用自定义端口
+        --url "tcp://localhost:${SSH_PORT}" \
         --logfile "${LOG_FILE}" \
         --loglevel "info"
     
@@ -149,7 +172,7 @@ start_cloudflared_tunnel() {
     # 检查隧道状态
     if [[ ! -e "${LOG_FILE}" ]]; then
         echo -e "${ERROR} Cloudflared 日志文件未找到"
-        exit 4
+        exit 5
     fi
     
     # 获取连接信息
@@ -159,11 +182,11 @@ start_cloudflared_tunnel() {
         echo -e "${ERROR} 无法提取 SSH 连接命令"
         echo -e "${WARN} Cloudflared 日志内容:"
         cat "${LOG_FILE}"
-        exit 5
+        exit 6
     fi
     
-    # 修正端口号（确保使用正确的端口）
-    SSH_CMD=$(echo "${SSH_CMD}" | sed "s/-p [0-9]\+/-p 2222/g")
+    # 修正端口号
+    SSH_CMD=$(echo "${SSH_CMD}" | sed "s/-p [0-9]\+/-p ${SSH_PORT}/g")
     
     echo -e "${INFO} SSH 连接命令已获取: ${SSH_CMD}"
 }
@@ -241,7 +264,7 @@ wait_for_continue() {
         # 检查隧道是否仍在运行
         if ! screen -list | grep -q "cloudflared"; then
             echo -e "${ERROR} Cloudflared 隧道意外终止"
-            exit 6
+            exit 7
         fi
         
         # 计算已过时间和剩余时间

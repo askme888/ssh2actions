@@ -1,315 +1,140 @@
 #!/usr/bin/env bash
 #
 # Copyright (c) 2020 P3TERX <https://p3terx.com>
-# Modified for Cloudflared by GitHub User
+# Modified by Your Name for cloudflared support
 #
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
+# Description: Connect to Github Actions VM via SSH using cloudflared
+# Version: 2.1 (cloudflared edition)
 #
-# File name：cloudflared-ssh.sh
-# Description: Connect to GitHub Actions VM via SSH using Cloudflared
-# Version: 1.3
 
 Green_font_prefix="\033[32m"
 Red_font_prefix="\033[31m"
-Yellow_font_prefix="\033[33m"
+Green_background_prefix="\033[42;37m"
+Red_background_prefix="\033[41;37m"
 Font_color_suffix="\033[0m"
 INFO="[${Green_font_prefix}INFO${Font_color_suffix}]"
 ERROR="[${Red_font_prefix}ERROR${Font_color_suffix}]"
-WARN="[${Yellow_font_prefix}WARN${Font_color_suffix}]"
-
 LOG_FILE='/tmp/cloudflared.log'
+TELEGRAM_LOG="/tmp/telegram.log"
 CONTINUE_FILE="/tmp/continue"
-CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
-SSH_PORT="2222"  # 使用非特权端口
 
-# 检查必要的环境变量
 if [[ -z "${SSH_PASSWORD}" && -z "${SSH_PUBKEY}" && -z "${GH_SSH_PUBKEY}" ]]; then
-    echo -e "${ERROR} 请设置至少一个认证方式: SSH_PASSWORD, SSH_PUBKEY 或 GH_SSH_PUBKEY"
+    echo -e "${ERROR} Please set 'SSH_PASSWORD' environment variable."
     exit 3
 fi
 
-# 安装 Cloudflared
 install_cloudflared() {
-    echo -e "${INFO} 正在安装 Cloudflared..."
-    
-    # 确定系统架构
-    local ARCH="amd64"
-    if [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
-        ARCH="arm64"
-    fi
-    
-    # 下载对应平台的 Cloudflared
-    if [[ "$(uname -s)" == "Linux" ]]; then
-        echo -e "${INFO} 下载 Linux (${ARCH}) 版本的 Cloudflared..."
-        curl -L --retry 3 --retry-delay 5 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" -o "${CLOUDFLARED_BIN}"
-    elif [[ "$(uname -s)" == "Darwin" ]]; then
-        echo -e "${INFO} 下载 macOS (${ARCH}) 版本的 Cloudflared..."
-        curl -L --retry 3 --retry-delay 5 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${ARCH}.tgz" -o cloudflared.tgz
-        tar -xzf cloudflared.tgz cloudflared
-        mv cloudflared "${CLOUDFLARED_BIN}"
+    echo -e "${INFO} Installing cloudflared..."
+    if [[ -n "$(uname | grep -i Linux)" ]]; then
+        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+        chmod +x cloudflared
+        sudo mv cloudflared /usr/local/bin/
+    elif [[ -n "$(uname | grep -i Darwin)" ]]; then
+        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz -o cloudflared.tgz
+        tar -xvzf cloudflared.tgz
         rm cloudflared.tgz
-    else
-        echo -e "${ERROR} 不支持的操作系统: $(uname -s)"
-        exit 1
-    fi
-    
-    # 设置执行权限
-    chmod +x "${CLOUDFLARED_BIN}"
-    echo -e "${INFO} Cloudflared 安装完成: $(${CLOUDFLARED_BIN} --version)"
-}
-
-# 配置 SSH 服务
-configure_ssh() {
-    echo -e "${INFO} 配置 SSH 服务..."
-    
-    # 备份原始 SSH 配置
-    sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-    
-    # 创建新的 SSH 配置
-    echo -e "${INFO} 创建新的 SSH 配置..."
-    sudo tee /etc/ssh/sshd_config > /dev/null << 'EOF'
-# 基础配置
-Port 2222
-Protocol 2
-HostKey /etc/ssh/ssh_host_rsa_key
-HostKey /etc/ssh/ssh_host_ecdsa_key
-HostKey /etc/ssh/ssh_host_ed25519_key
-SyslogFacility AUTH
-LogLevel INFO
-LoginGraceTime 120
-PermitRootLogin yes
-StrictModes yes
-IgnoreRhosts yes
-PermitEmptyPasswords no
-ChallengeResponseAuthentication no
-
-# 安全算法配置
-KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
-Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
-
-# 认证设置
-PubkeyAuthentication yes
-PasswordAuthentication yes
-X11Forwarding no
-PrintMotd no
-AcceptEnv LANG LC_*
-Subsystem sftp /usr/lib/openssh/sftp-server
-EOF
-
-    # 设置用户密码
-    if [[ -n "${SSH_PASSWORD}" ]]; then
-        echo -e "${INFO} 设置用户 ${USER} 的密码..."
-        echo -e "${SSH_PASSWORD}\n${SSH_PASSWORD}" | sudo passwd "${USER}" >/dev/null 2>&1
-    else
-        # 禁用密码认证
-        echo "PasswordAuthentication no" | sudo tee -a /etc/ssh/sshd_config >/dev/null
-    fi
-
-    # 配置公钥认证
-    if [[ -n "${SSH_PUBKEY}" ]] || [[ -n "${GH_SSH_PUBKEY}" ]]; then
-        echo -e "${INFO} 配置 SSH 公钥..."
-        SSH_DIR="${HOME}/.ssh"
-        mkdir -p "${SSH_DIR}"
-        chmod 700 "${SSH_DIR}"
-        touch "${SSH_DIR}/authorized_keys"
-        chmod 600 "${SSH_DIR}/authorized_keys"
-        
-        [[ -n "${SSH_PUBKEY}" ]] && echo "${SSH_PUBKEY}" >> "${SSH_DIR}/authorized_keys"
-        [[ -n "${GH_SSH_PUBKEY}" ]] && echo "${GH_SSH_PUBKEY}" >> "${SSH_DIR}/authorized_keys"
-    fi
-
-    # 测试 SSH 配置
-    echo -e "${INFO} 测试 SSH 配置..."
-    if ! sudo /usr/sbin/sshd -t; then
-        echo -e "${ERROR} SSH 配置测试失败，恢复原始配置"
-        sudo cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
-        sudo service ssh restart || sudo systemctl restart ssh
-        exit 4
-    fi
-
-    # macOS 特殊配置
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        echo -e "${INFO} 配置 macOS SSH 服务..."
+        chmod +x cloudflared
+        sudo mv cloudflared /usr/local/bin/
+        USER=root
+        echo 'PermitRootLogin yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
         sudo launchctl unload /System/Library/LaunchDaemons/ssh.plist
         sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
     else
-        # Linux 系统重启 SSH 服务
-        echo -e "${INFO} 重启 SSH 服务..."
-        sudo service ssh restart || sudo systemctl restart ssh
+        echo -e "${ERROR} Unsupported system!"
+        exit 1
     fi
-    
-    # 显示 SSH 服务状态
-    echo -e "${INFO} SSH 服务状态:"
-    sudo service ssh status || sudo systemctl status ssh
+    cloudflared --version
 }
 
-# 启动 Cloudflared 隧道
-start_cloudflared_tunnel() {
-    echo -e "${INFO} 启动 Cloudflared SSH 隧道..."
-    
-    # 清理旧日志
-    rm -f "${LOG_FILE}"
-    
-    # 生成随机隧道主机名
-    local RANDOM_ID=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)
-    local TUNNEL_HOST="${TUNNEL_HOSTNAME:-ssh-${GITHUB_RUN_ID}-${RANDOM_ID}.trycloudflare.com}"
-    
-    echo -e "${INFO} 使用隧道主机名: ${TUNNEL_HOST}"
-    
-    # 启动隧道（使用正确的参数）
-    screen -dmS cloudflared \
-        ${CLOUDFLARED_BIN} access tcp \
-        --hostname "${TUNNEL_HOST}" \
-        --url "tcp://localhost:${SSH_PORT}" \
-        --logfile "${LOG_FILE}" \
-        --loglevel "info"
-    
-    echo -e "${INFO} 等待隧道初始化 (20 秒)..."
-    sleep 20
-    
-    # 检查隧道状态
-    if [[ ! -e "${LOG_FILE}" ]]; then
-        echo -e "${ERROR} Cloudflared 日志文件未找到"
-        exit 5
-    fi
-    
-    # 获取连接信息
-    SSH_CMD=$(grep -Eo "ssh .+@.+ -p [0-9]+" "${LOG_FILE}" | tail -1)
-    
-    if [[ -z "${SSH_CMD}" ]]; then
-        echo -e "${ERROR} 无法提取 SSH 连接命令"
-        echo -e "${WARN} Cloudflared 日志内容:"
-        cat "${LOG_FILE}"
-        exit 6
-    fi
-    
-    # 修正端口号
-    SSH_CMD=$(echo "${SSH_CMD}" | sed "s/-p [0-9]\+/-p ${SSH_PORT}/g")
-    
-    echo -e "${INFO} SSH 连接命令已获取: ${SSH_CMD}"
-}
-
-# 发送 Telegram 通知
-send_telegram_notification() {
-    if [[ -n "${TELEGRAM_BOT_TOKEN}" && -n "${TELEGRAM_CHAT_ID}" ]]; then
-        echo -e "${INFO} 发送 Telegram 通知..."
-        
-        # 创建通知消息
-        local MSG="*GitHub Actions - Cloudflared SSH 会话信息:*
-
-🏗️ *仓库:* \`$GITHUB_REPOSITORY\`
-🔧 *工作流:* \`$GITHUB_WORKFLOW\`
-🆔 *运行 ID:* \`$GITHUB_RUN_ID\`
-
-⚡ *SSH 命令:*
-\`${SSH_CMD}\`"
-
-        if [[ -n "${SSH_PASSWORD}" ]]; then
-            MSG+="
-🔑 *密码:* \`${SSH_PASSWORD}\`"
-        fi
-
-        MSG+="
-
-🔔 *下一步:*
-在工作流运行器中执行 \`touch ${CONTINUE_FILE}\` 继续
-
-💡 *提示:*
-会话将在 30 分钟后自动终止"
-        
-        # 发送通知
-        TELEGRAM_RESPONSE=$(curl -sSX POST \
-            "${TELEGRAM_API_URL:-https://api.telegram.org}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d "disable_web_page_preview=true" \
-            -d "parse_mode=Markdown" \
-            -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            -d "text=${MSG}" 2>&1)
-        
-        # 检查发送结果
-        if echo "${TELEGRAM_RESPONSE}" | grep -q '"ok":true'; then
-            echo -e "${INFO} Telegram 通知发送成功"
-        else
-            echo -e "${WARN} Telegram 通知发送失败: ${TELEGRAM_RESPONSE}"
-        fi
-    fi
-}
-
-# 显示连接信息
-display_connection_info() {
-    echo -e "\n${Green_font_prefix}=============================================="
-    echo "=           SSH 连接信息               ="
-    echo "=============================================="
-    echo -e "命令: ${SSH_CMD}${Font_color_suffix}"
-    
+setup_ssh() {
     if [[ -n "${SSH_PASSWORD}" ]]; then
-        echo -e "${Yellow_font_prefix}密码: ${SSH_PASSWORD}${Font_color_suffix}"
+        echo -e "${INFO} Setting user password..."
+        echo -e "${SSH_PASSWORD}\n${SSH_PASSWORD}" | sudo passwd "${USER}"
     fi
-    
-    echo -e "\n${Green_font_prefix}连接后执行以下命令继续工作流:"
-    echo -e "touch ${CONTINUE_FILE}${Font_color_suffix}"
-    echo -e "${Green_font_prefix}==============================================${Font_color_suffix}\n"
+    if [[ -n "${SSH_PUBKEY}" ]]; then
+        echo -e "${INFO} Setting SSH public key..."
+        mkdir -p ~/.ssh
+        echo "${SSH_PUBKEY}" >> ~/.ssh/authorized_keys
+    fi
+    if [[ -n "${GH_SSH_PUBKEY}" ]]; then
+        echo -e "${INFO} Setting GitHub SSH public key..."
+        mkdir -p ~/.ssh
+        curl -sSL "https://github.com/${GH_SSH_PUBKEY}.keys" >> ~/.ssh/authorized_keys
+    fi
 }
 
-# 等待继续信号
-wait_for_continue() {
-    echo -e "${INFO} 等待继续信号 (${CONTINUE_FILE})..."
-    echo -e "${INFO} 会话将在 30 分钟后自动终止"
+start_cloudflared() {
+    echo -e "${INFO} Starting cloudflared tunnel..."
+    screen -dmS cloudflared \
+        cloudflared tunnel --url ssh://localhost:22 --logfile $LOG_FILE --metrics localhost:49589
     
-    local start_time=$(date +%s)
-    local timeout=1800  # 30 分钟超时
-    
-    while [[ ! -e "${CONTINUE_FILE}" ]]; do
-        # 检查隧道是否仍在运行
-        if ! screen -list | grep -q "cloudflared"; then
-            echo -e "${ERROR} Cloudflared 隧道意外终止"
-            exit 7
+    echo -e "${INFO} Waiting for tunnel connection..."
+    sleep 10
+    while ! grep -q "Connection" $LOG_FILE; do
+        sleep 2
+        if [[ $SECONDS -gt 60 ]]; then
+            echo -e "${ERROR} Tunnel connection timeout"
+            exit 4
         fi
-        
-        # 计算已过时间和剩余时间
-        local current_time=$(date +%s)
-        local elapsed=$((current_time - start_time))
-        local remaining=$((timeout - elapsed))
-        
-        # 检查是否超时
-        if [[ $remaining -le 0 ]]; then
-            echo -e "${ERROR} 等待超时，工作流将继续"
-            break
-        fi
-        
-        # 显示剩余时间
-        local minutes=$((remaining / 60))
-        local seconds=$((remaining % 60))
-        printf "${INFO} 剩余时间: %02d分%02d秒\r" "$minutes" "$seconds"
-        sleep 5
     done
     
-    echo -e "${INFO} 检测到继续信号，退出..."
+    TUNNEL_URL=$(grep -oE "https://[0-9a-z\-]+\.trycloudflare.com" $LOG_FILE | head -n1)
+    SSH_CMD="ssh ${USER}@${TUNNEL_URL#https://} -p 22"
 }
 
-# 主函数
-main() {
-    # 安装必要组件
-    install_cloudflared
-    
-    # 配置 SSH 服务
-    configure_ssh
-    
-    # 启动隧道
-    start_cloudflared_tunnel
-    
-    # 发送通知
-    send_telegram_notification
-    
-    # 显示连接信息
-    display_connection_info
-    
-    # 等待继续信号
-    wait_for_continue
-    
-    exit 0
+send_telegram() {
+    local MSG="
+*GitHub Actions - cloudflared session info:*
+
+⚡ *CLI:*
+\`${SSH_CMD}\`
+
+🔔 *TIPS:*
+Run \`touch ${CONTINUE_FILE}\` to continue.
+"
+    curl -sSX POST "${TELEGRAM_API_URL:-https://api.telegram.org}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "disable_web_page_preview=true" \
+        -d "parse_mode=Markdown" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        -d "text=${MSG}" > $TELEGRAM_LOG
 }
 
-# 执行主函数
-main
+# Main process
+install_cloudflared
+setup_ssh
+start_cloudflared
+
+if [[ -n "${TUNNEL_URL}" ]]; then
+    echo -e "${INFO} SSH Command: ${Green_font_prefix}${SSH_CMD}${Font_color_suffix}"
+    
+    if [[ -n "${TELEGRAM_BOT_TOKEN}" && -n "${TELEGRAM_CHAT_ID}" ]]; then
+        echo -e "${INFO} Sending Telegram notification..."
+        send_telegram
+        if grep -q '"ok":true' $TELEGRAM_LOG; then
+            echo -e "${INFO} Telegram notification sent!"
+        else
+            echo -e "${ERROR} Telegram notification failed: $(cat $TELEGRAM_LOG)"
+        fi
+    fi
+    
+    for i in {1..10}; do
+        echo "========================================"
+        echo "Use this command to connect:"
+        echo -e "${Green_font_prefix}${SSH_CMD}${Font_color_suffix}"
+        echo "Run 'touch ${CONTINUE_FILE}' to continue"
+        echo "========================================"
+        sleep 10
+    done
+    
+    while :; do
+        sleep 5
+        if [[ -e $CONTINUE_FILE ]]; then
+            echo -e "${INFO} Continue triggered, exiting..."
+            break
+        fi
+    done
+else
+    echo -e "${ERROR} Failed to get tunnel URL"
+    cat $LOG_FILE
+    exit 5
+fi

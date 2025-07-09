@@ -133,7 +133,7 @@ start_cloudflared_tunnel() {
     
     # 启动隧道
     screen -dmS cloudflared \
-        ${CLOUDFLARED_BIN} access tcp \
+        sudo ${CLOUDFLARED_BIN} access tcp \
         --hostname "${TUNNEL_HOST}" \
         --url tcp://localhost:22 \
         --logfile "${LOG_FILE}" \
